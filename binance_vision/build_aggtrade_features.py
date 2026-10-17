@@ -37,8 +37,8 @@ def compute_aggtrade_features(df_or_lf: pl.DataFrame | pl.LazyFrame, timeframe: 
         (pl.col("transact_time") - pl.col("transact_time").shift(1)).alias("dt_ms"),
     ])
 
-    # 2. Resample and aggregate per timeframe window
-    features_lf = lf.group_by_dynamic("timestamp", every=timeframe).agg([
+    # 2. Resample and aggregate per timeframe window (label="right" so window timestamp matches close_time)
+    features_lf = lf.group_by_dynamic("timestamp", every=timeframe, label="right").agg([
         # OHLC & Close
         pl.col("price").first().alias("open"),
         pl.col("price").max().alias("high"),
