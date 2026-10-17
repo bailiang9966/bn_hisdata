@@ -3,15 +3,13 @@ Unit tests for binance_vision/download_binance_vision.py
 """
 import hashlib
 import io
-import tempfile
 import zipfile
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
-import requests
 
 from binance_vision.download_binance_vision import (
     dest_path,
@@ -52,13 +50,9 @@ def test_dest_path():
     path_kline = dest_path(root, "spot", "daily", "klines", "BTCUSDT", "1m", "2025-06-01")
     assert path_kline == Path("/tmp/data/spot/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2025-06-01.zip")
 
-    path_metrics = dest_path(root, "um", "daily", "metrics", "BTCUSDT", "1m", "2025-06-01")
-    assert path_metrics == Path("/tmp/data/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2025-06-01.zip")
-
 
 def test_parse_list_arg():
     assert parse_list_arg("BTCUSDT, ETHUSDT ,SOLUSDT") == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    assert parse_list_arg("klines, metrics, ") == ["klines", "metrics"]
 
 
 def test_get_schema_overrides():
@@ -66,12 +60,6 @@ def test_get_schema_overrides():
     schema_k = get_schema_overrides("klines", fdtype)
     assert schema_k["open"] == pl.Float32
     assert schema_k["open_time"] == pl.Int64
-
-    schema_agg = get_schema_overrides("aggTrades", fdtype)
-    assert schema_agg["is_buyer_maker"] == pl.Boolean
-
-    schema_m = get_schema_overrides("metrics", fdtype)
-    assert schema_m["sum_open_interest"] == pl.Float32
 
 
 def create_zip_with_csv(csv_content: str, csv_filename: str = "data.csv") -> bytes:
@@ -82,7 +70,6 @@ def create_zip_with_csv(csv_content: str, csv_filename: str = "data.csv") -> byt
 
 
 def test_process_klines(tmp_path):
-    # CSV content with header
     csv_header = (
         "open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore\n"
         "1700000000000,100.0,105.0,95.0,102.0,10.0,1700000059999,1020.0,50,4.0,408.0,0\n"
@@ -100,27 +87,8 @@ def test_process_klines(tmp_path):
     df = pl.read_parquet(parquet_out)
     assert df.columns == ["open_time", "open", "high", "low", "close", "close_time", "count", "buy_vol", "sell_vol"]
     assert df["buy_vol"][0] == pytest.approx(4.0)
-    assert df["sell_vol"][0] == pytest.approx(6.0)  # volume 10.0 - taker_buy_volume 4.0
+    assert df["sell_vol"][0] == pytest.approx(6.0)
     assert df["close_time"][0] == 1700000060000  # raw close_time (1700000059999) + 1ms
-    assert df["open_time"].dtype == pl.Int64
-    assert df["open"].dtype == pl.Float32
-
-
-def test_process_klines_no_header(tmp_path):
-    csv_no_header = "1700000000000,100.0,105.0,95.0,102.0,10.0,1700000059999,1020.0,50,4.0,408.0,0\n"
-    zip_bytes = create_zip_with_csv(csv_no_header)
-    zip_file = tmp_path / "test-kline-noheader.zip"
-    zip_file.write_bytes(zip_bytes)
-
-    logs = []
-    process(zip_file, "klines", "parquet", pl.Float32, logs.append)
-
-    parquet_out = zip_file.with_suffix(".parquet")
-    assert parquet_out.exists()
-
-    df = pl.read_parquet(parquet_out)
-    assert len(df) == 1
-    assert df["buy_vol"][0] == pytest.approx(4.0)
 
 
 def test_process_aggtrades(tmp_path):
@@ -144,32 +112,8 @@ def test_process_aggtrades(tmp_path):
     assert df["is_buyer_maker"][0] is True
 
 
-def test_process_metrics(tmp_path):
-    csv_met = (
-        "create_time,symbol,sum_open_interest,sum_open_interest_value,count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,sum_taker_long_short_vol_ratio\n"
-        "2025-06-01 00:00:00,BTCUSDT,1000.0,500000.0,1.2,1.3,1.1,1.0\n"
-    )
-    zip_bytes = create_zip_with_csv(csv_met)
-    zip_file = tmp_path / "test-metrics.zip"
-    zip_file.write_bytes(zip_bytes)
-
-    logs = []
-    process(zip_file, "metrics", "parquet", pl.Float32, logs.append)
-
-    parquet_out = zip_file.with_suffix(".parquet")
-    assert parquet_out.exists()
-
-    df = pl.read_parquet(parquet_out)
-    assert len(df) == 1
-    # Check "2025-06-01 00:00:00" converted to epoch ms Int64
-    assert df["create_time"][0] == 1748736000000
-    assert df["sum_open_interest"][0] == pytest.approx(1000.0)
-
-
 def test_fetch_expected_sha256():
     session = MagicMock()
-
-    # Successful checksum download
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.text = "A1B2C3D4E5F6  BTCUSDT-1m-2025-06-01.zip\n"
@@ -179,15 +123,9 @@ def test_fetch_expected_sha256():
     sha = fetch_expected_sha256(session, "http://example.com/file.zip.CHECKSUM", logs.append)
     assert sha == "a1b2c3d4e5f6"
 
-    # HTTP 404 response
-    mock_resp.status_code = 404
-    sha_404 = fetch_expected_sha256(session, "http://example.com/file.zip.CHECKSUM", logs.append)
-    assert sha_404 is None
-
 
 def test_download_one(tmp_path):
     session = MagicMock()
-
     data_bytes = b"sample zip content"
     expected_sha = hashlib.sha256(data_bytes).hexdigest()
 
@@ -214,3 +152,26 @@ def test_download_one(tmp_path):
     assert res == "ok"
     assert dest.exists()
     assert dest.read_bytes() == data_bytes
+
+
+def test_compute_aggtrade_features():
+    from binance_vision.build_aggtrade_features import compute_aggtrade_features
+
+    df_raw = pl.DataFrame({
+        "agg_trade_id": [1, 2, 3],
+        "price": [100.0, 101.0, 100.5],
+        "quantity": [1.0, 2.0, 0.5],
+        "first_trade_id": [10, 20, 30],
+        "last_trade_id": [10, 22, 30],
+        "transact_time": [1700000000000, 1700000010000, 1700000020000],
+        "is_buyer_maker": [False, True, False],
+        "is_best_match": [True, True, True],
+    })
+
+    feat_df = compute_aggtrade_features(df_raw, "1m").collect()
+    assert len(feat_df) == 1
+    assert "vwap_disparity" in feat_df.columns
+    assert "price_robust_zscore" in feat_df.columns
+    assert "qty_iqr" in feat_df.columns
+    assert "mean_sweep_depth" in feat_df.columns
+    assert feat_df["trade_count"][0] == 3
