@@ -31,7 +31,12 @@ def build_master_feature_table(
     lf_spot = df_spot_klines.lazy() if isinstance(df_spot_klines, pl.DataFrame) else df_spot_klines
 
     # 1. Futures Klines (Primary OHLC & Futures Volume)
-    lf_um_prep = lf_um.select([
+    lf_um_prep = lf_um.with_columns(
+        pl.when(pl.col("close_time") > 1e14)
+          .then(pl.col("close_time") // 1000)
+          .otherwise(pl.col("close_time"))
+          .alias("close_time")
+    ).select([
         pl.col("close_time"),
         pl.col("open"),
         pl.col("high"),
@@ -43,7 +48,12 @@ def build_master_feature_table(
     ])
 
     # 2. Spot Klines (Spot Volume & Spot Close for Basis)
-    lf_spot_prep = lf_spot.select([
+    lf_spot_prep = lf_spot.with_columns(
+        pl.when(pl.col("close_time") > 1e14)
+          .then(pl.col("close_time") // 1000)
+          .otherwise(pl.col("close_time"))
+          .alias("close_time")
+    ).select([
         pl.col("close_time"),
         pl.col("close").alias("spot_close"),
         pl.col("buy_vol").alias("spot_buy_vol"),

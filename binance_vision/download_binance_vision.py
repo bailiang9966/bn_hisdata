@@ -258,7 +258,14 @@ def process(zip_path: Path, category: str, fmt: str, fdtype: pl.DataType, log) -
             lf = lf.with_columns([
                 pl.col("taker_buy_volume").alias("buy_vol"),
                 (pl.col("volume") - pl.col("taker_buy_volume")).alias("sell_vol"),
-                (pl.col("close_time") + 1).alias("close_time"),
+                pl.when(pl.col("close_time") > 1e14)
+                  .then(pl.col("close_time") // 1000 + 1)
+                  .otherwise(pl.col("close_time") + 1)
+                  .alias("close_time"),
+                pl.when(pl.col("open_time") > 1e14)
+                  .then(pl.col("open_time") // 1000)
+                  .otherwise(pl.col("open_time"))
+                  .alias("open_time"),
             ]).select(KLINE_KEEP)
         elif category == "aggTrades":
             pass
