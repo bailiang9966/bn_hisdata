@@ -101,6 +101,7 @@ def test_process_klines(tmp_path):
     assert df.columns == ["open_time", "open", "high", "low", "close", "close_time", "count", "buy_vol", "sell_vol"]
     assert df["buy_vol"][0] == pytest.approx(4.0)
     assert df["sell_vol"][0] == pytest.approx(6.0)  # volume 10.0 - taker_buy_volume 4.0
+    assert df["close_time"][0] == 1700000060000  # raw close_time (1700000059999) + 1ms
     assert df["open_time"].dtype == pl.Int64
     assert df["open"].dtype == pl.Float32
 

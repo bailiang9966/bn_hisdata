@@ -345,6 +345,7 @@ def process(zip_path: Path, category: str, fmt: str, fdtype: pl.DataType, log) -
             lf = lf.with_columns([
                 pl.col("taker_buy_volume").alias("buy_vol"),
                 (pl.col("volume") - pl.col("taker_buy_volume")).alias("sell_vol"),
+                (pl.col("close_time") + 1).alias("close_time"),
             ]).select(KLINE_KEEP)
         elif category == "aggTrades":
             pass  # Columns already typed via schema_overrides
