@@ -47,14 +47,15 @@ def add_rolling_features_and_targets(df: pl.DataFrame, target_horizon: int = 5) 
             exprs.append(((pl.col("close") - r_med) / (1.4826 * r_mad + 1e-8)).alias(col_z))
             feature_cols.append(col_z)
 
-    # OI Changes
-    for w in [5, 15, 60]:
-        col_oi = f"oi_change_{w}m"
-        exprs.append(((pl.col("sum_open_interest") - pl.col("sum_open_interest").shift(w)) /
-                      (pl.col("sum_open_interest").shift(w) + 1e-8)).alias(col_oi))
-        feature_cols.append(col_oi)
+    # OI Changes (if OI exists)
+    if "sum_open_interest" in df.columns:
+        for w in [5, 15, 60]:
+            col_oi = f"oi_change_{w}m"
+            exprs.append(((pl.col("sum_open_interest") - pl.col("sum_open_interest").shift(w)) /
+                          (pl.col("sum_open_interest").shift(w) + 1e-8)).alias(col_oi))
+            feature_cols.append(col_oi)
 
-    # Add existing columns to feature_cols
+    # Add existing base columns to feature_cols
     base_features = [
         "basis", "basis_rate", "um_buy_vol", "um_sell_vol", "um_count",
         "spot_buy_vol", "spot_sell_vol", "spot_count",
@@ -83,10 +84,9 @@ def clean_dataframe(df: pl.DataFrame, feature_cols: list[str]) -> tuple[pl.DataF
     valid_cols = []
     for c in feature_cols:
         null_cnt = df[c].null_count()
-        if null_cnt < len(df) * 0.2:  # Keep columns with <20% missing
+        if null_cnt < len(df) * 0.2:
             valid_cols.append(c)
 
-    # Fill nulls and clip extreme values in valid feature columns
     clean_exprs = []
     for c in valid_cols:
         clean_exprs.append(
@@ -107,9 +107,9 @@ def train_and_evaluate(master_parquet_path: str, target_horizon: int = 5, test_r
 
     print(f"Cleaned dataset rows: {len(df_clean)}, features count: {len(feature_cols)}")
 
-    # Time-series split (Strict chronological order)
+    # Time-series split (80% train, 20% test with 5m embargo to prevent overlap leakage)
     split_idx = int(len(df_clean) * (1 - test_ratio))
-    df_train = df_clean.slice(0, split_idx)
+    df_train = df_clean.slice(0, split_idx - target_horizon)
     df_test = df_clean.slice(split_idx, len(df_clean) - split_idx)
 
     print(f"Train set: {len(df_train)} rows, Test set: {len(df_test)} rows")
@@ -120,7 +120,6 @@ def train_and_evaluate(master_parquet_path: str, target_horizon: int = 5, test_r
     X_test = df_test.select(feature_cols).to_numpy()
     y_test = df_test["target"].to_numpy()
 
-    # Train LightGBM Model
     params = {
         "objective": "binary",
         "metric": "binary_logloss",
@@ -146,45 +145,55 @@ def train_and_evaluate(master_parquet_path: str, target_horizon: int = 5, test_r
         callbacks=[lgb.early_stopping(50, verbose=False)],
     )
 
-    preds_prob = model.predict(X_test)
+    preds_test = model.predict(X_test)
+    preds_train = model.predict(X_train)
 
-    auc = roc_auc_score(y_test, preds_prob)
-    loss = log_loss(y_test, preds_prob)
-    print(f"\n=== Overall Test Metrics ===")
+    auc = roc_auc_score(y_test, preds_test)
+    loss = log_loss(y_test, preds_test)
+    print(f"\n=== Overall Test Metrics (Out-Of-Sample) ===")
     print(f"AUC: {auc:.4f}")
     print(f"LogLoss: {loss:.4f}")
 
-    # Evaluate High-Confidence Trades (~15-20 trades/day)
-    test_days = (df_test["close_time"].max() - df_test["close_time"].min()) / (1000 * 3600 * 24)
+    # Calibrate Probability Thresholds STRICTLY on Train Set (In-Sample Calibration)
+    train_dev = np.abs(preds_train - 0.5)
     target_trades_per_day = 18.0
-    desired_total_trades = max(10, int(test_days * target_trades_per_day))
+    train_days = (df_train["close_time"].max() - df_train["close_time"].min()) / (1000 * 3600 * 24)
+    desired_train_trades = int(train_days * target_trades_per_day)
 
-    # Calibrate probability threshold
-    dev_from_half = np.abs(preds_prob - 0.5)
-    sorted_devs = np.sort(dev_from_half)[::-1]
-    threshold_dev = sorted_devs[min(desired_total_trades, len(sorted_devs) - 1)]
-    long_threshold = 0.5 + threshold_dev
-    short_threshold = 0.5 - threshold_dev
+    sorted_train_dev = np.sort(train_dev)[::-1]
+    thresh_dev = sorted_train_dev[min(desired_train_trades, len(sorted_train_dev) - 1)]
+    long_threshold = 0.5 + thresh_dev
+    short_threshold = 0.5 - thresh_dev
 
-    long_mask = preds_prob >= long_threshold
-    short_mask = preds_prob <= short_threshold
+    print(f"\n=== Threshold Calibrated on Train Set ===")
+    print(f"Long >= {long_threshold:.4f}, Short <= {short_threshold:.4f}")
 
-    selected_mask = long_mask | short_mask
-    selected_preds = (preds_prob[selected_mask] >= 0.5).astype(int)
-    selected_y = y_test[selected_mask]
+    # Evaluate on Test Set with 5m De-overlapping cooldown filter
+    test_days = (df_test["close_time"].max() - df_test["close_time"].min()) / (1000 * 3600 * 24)
+    test_close_times = df_test["close_time"].to_numpy()
 
-    n_trades = len(selected_y)
-    win_rate = np.mean(selected_preds == selected_y) if n_trades > 0 else 0.0
+    selected_trades = []
+    last_trade_time = -999999
+
+    for i in range(len(preds_test)):
+        p = preds_test[i]
+        t = test_close_times[i]
+        if (p >= long_threshold or p <= short_threshold) and (t - last_trade_time >= target_horizon * 60 * 1000):
+            pred_label = 1 if p >= long_threshold else 0
+            actual_label = y_test[i]
+            selected_trades.append((t, pred_label, actual_label))
+            last_trade_time = t
+
+    n_trades = len(selected_trades)
+    win_rate = (sum(1 for tr in selected_trades if tr[1] == tr[2]) / n_trades) if n_trades > 0 else 0.0
     trades_per_day = n_trades / max(1e-3, test_days)
 
-    print(f"\n=== High-Confidence Filtering Target: ~15-20 Trades/Day ===")
+    print(f"\n=== Out-Of-Sample Realistic De-Overlapped Results ===")
     print(f"Test Duration: {test_days:.1f} Days")
-    print(f"Probability Thresholds: Long >= {long_threshold:.4f}, Short <= {short_threshold:.4f}")
-    print(f"Total High-Confidence Trades: {n_trades}")
+    print(f"Total Discrete Trades: {n_trades}")
     print(f"Daily Trade Frequency: {trades_per_day:.2f} Trades/Day")
-    print(f"High-Confidence Win Rate (Precision): {win_rate * 100:.2f}%")
+    print(f"Out-Of-Sample Precision / Win Rate: {win_rate * 100:.2f}%")
 
-    # Feature Importance Top 10
     imp = model.feature_importance(importance_type="gain")
     imp_indices = np.argsort(imp)[::-1][:10]
 

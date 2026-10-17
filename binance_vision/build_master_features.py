@@ -86,8 +86,9 @@ def build_master_feature_table(
     # 5. Join Metrics (5m sampling via join_asof / ffill) (if provided)
     if df_metrics is not None:
         df_met = df_metrics.lazy() if isinstance(df_metrics, pl.DataFrame) else df_metrics
+        # Metrics interval 00:00-00:05 is published/available at 00:05:00. Shift +5m (300,000 ms) to avoid lookahead leakage.
         df_met = df_met.select([
-            pl.col("create_time"),
+            (pl.col("create_time") + 300000).alias("create_time"),
             pl.col("sum_open_interest"),
             pl.col("sum_open_interest_value"),
             pl.col("count_toptrader_long_short_ratio"),

@@ -46,9 +46,9 @@ def test_build_master_feature_table_basic():
         "is_best_match": [True, True],
     })
 
-    # Mock Metrics
+    # Mock Metrics for 5m interval 22:09-22:14 (create_time = t1 - 300,000ms -> shifted to t1)
     df_met = pl.DataFrame({
-        "create_time": [t1],
+        "create_time": [t1 - 300000],
         "sum_open_interest": [1000.0],
         "sum_open_interest_value": [500000.0],
         "count_toptrader_long_short_ratio": [1.5],
