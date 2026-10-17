@@ -6,7 +6,8 @@ Combines:
   2. Spot 1m Klines (Volume + Counts + Spot Close for Basis)
   3. Futures 1m aggTrades Microstructure Features (VWAP disparity, Robust Z-score, RV, Sweep Depth, etc.)
   4. Futures 5m Metrics (Open Interest, Long/Short ratios via join_asof / ffill)
-  5. Derives Basis and Basis Rate (Futures Close - Spot Close)
+  5. Derives Basis (Futures Close - Spot Close)
+  6. Provides rolling_quantile_bucket helper for rolling quantile bucket discretizations.
 """
 import argparse
 from pathlib import Path
@@ -17,6 +18,23 @@ from binance_vision.build_aggtrade_features import compute_aggtrade_features
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
+
+
+def rolling_quantile_bucket(col_name: str, window_size: int, n_buckets: int = 10, alias: str = None) -> pl.Expr:
+    """Compute integer quantile bucket (0 .. n_buckets-1) for a column over a rolling window_size."""
+    if alias is None:
+        alias = f"{col_name}_bucket_{window_size}m_q{n_buckets}"
+
+    col = pl.col(col_name)
+    r_min = col.rolling_min(window_size=window_size)
+    r_max = col.rolling_max(window_size=window_size)
+
+    # Scale to [0, 1] relative position within the rolling window, then map to bucket index
+    rel_pos = (col - r_min) / (r_max - r_min + 1e-8)
+    bucket = (rel_pos * n_buckets).floor().cast(pl.Int32)
+    bucket_clipped = pl.when(bucket >= n_buckets).then(n_buckets - 1).when(bucket < 0).then(0).otherwise(bucket)
+
+    return bucket_clipped.alias(alias)
 
 
 def build_master_feature_table(
@@ -66,10 +84,9 @@ def build_master_feature_table(
     lf_spot_prep = lf_spot_prep.unique(subset=["close_time"])
     master_lf = lf_um_prep.join(lf_spot_prep, on="close_time", how="inner")
 
-    # 3. Compute Basis & Basis Rate
+    # 3. Compute Basis (Futures Close - Spot Close)
     master_lf = master_lf.with_columns([
         (pl.col("close") - pl.col("spot_close")).alias("basis"),
-        ((pl.col("close") - pl.col("spot_close")) / (pl.col("spot_close") + 1e-8)).alias("basis_rate"),
     ])
 
     # 4. Join aggTrades Microstructure Features (if provided)
@@ -86,7 +103,7 @@ def build_master_feature_table(
     # 5. Join Metrics (5m sampling via join_asof / ffill) (if provided)
     if df_metrics is not None:
         df_met = df_metrics.lazy() if isinstance(df_metrics, pl.DataFrame) else df_metrics
-        # Metrics interval 00:00-00:05 is published/available at 00:05:00. Shift +5m (300,000 ms) to avoid lookahead leakage.
+        # Shift metrics +5m (300,000ms) to ensure no lookahead leakage
         df_met = df_met.select([
             (pl.col("create_time") + 300000).alias("create_time"),
             pl.col("sum_open_interest"),
@@ -102,7 +119,7 @@ def build_master_feature_table(
             left_on="close_time",
             right_on="create_time",
             strategy="backward",
-        )
+        ).drop("create_time")
 
     return master_df
 

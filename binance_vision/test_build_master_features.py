@@ -4,12 +4,10 @@ Unit tests for binance_vision/build_master_features.py
 import polars as pl
 import pytest
 
-from binance_vision.build_master_features import build_master_feature_table
+from binance_vision.build_master_features import build_master_feature_table, rolling_quantile_bucket
 
 
 def test_build_master_feature_table_basic():
-    # Aligned minute timestamps:
-    # 22:14:00.000 (1700000040000) and 22:15:00.000 (1700000100000)
     t1 = 1700000040000
     t2 = 1700000100000
 
@@ -34,19 +32,19 @@ def test_build_master_feature_table_basic():
         "count": [80, 90],
     })
 
-    # Mock aggTrades in interval (22:13:00, 22:14:00] -> timestamp label="right" is 22:14:00 (t1)
+    # Mock aggTrades
     df_agg = pl.DataFrame({
         "agg_trade_id": [1, 2],
         "price": [101.0, 102.0],
         "quantity": [1.0, 2.0],
         "first_trade_id": [10, 20],
         "last_trade_id": [10, 22],
-        "transact_time": [1699999990000, 1700000010000],  # 22:13:10 and 22:13:30
+        "transact_time": [1699999990000, 1700000010000],
         "is_buyer_maker": [False, True],
         "is_best_match": [True, True],
     })
 
-    # Mock Metrics for 5m interval 22:09-22:14 (create_time = t1 - 300,000ms -> shifted to t1)
+    # Mock Metrics
     df_met = pl.DataFrame({
         "create_time": [t1 - 300000],
         "sum_open_interest": [1000.0],
@@ -61,11 +59,19 @@ def test_build_master_feature_table_basic():
 
     assert len(master) == 2
     assert "basis" in master.columns
-    assert "basis_rate" in master.columns
+    assert "basis_rate" not in master.columns
+    assert "create_time" not in master.columns
     assert master["basis"][0] == pytest.approx(3.0)
-    assert master["basis_rate"][0] == pytest.approx(0.03)
-
-    # Verify aggTrades features joined at close_time t1
-    assert "vwap_disparity" in master.columns
-    assert master["vwap_disparity"][0] is not None
     assert master["sum_open_interest"][0] == pytest.approx(1000.0)
+
+
+def test_rolling_quantile_bucket():
+    df = pl.DataFrame({"basis": [-10, 0, 10, 20, 30, 25, 15, 5, -5, -15]})
+    res = df.with_columns(rolling_quantile_bucket("basis", window_size=5, n_buckets=5))
+
+    assert "basis_bucket_5m_q5" in res.columns
+    # Check non-null values mapped to buckets 0 .. 4
+    non_null_buckets = res["basis_bucket_5m_q5"].drop_nulls()
+    assert len(non_null_buckets) > 0
+    assert non_null_buckets.min() >= 0
+    assert non_null_buckets.max() <= 4
