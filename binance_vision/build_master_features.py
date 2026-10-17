@@ -29,12 +29,12 @@ def rolling_quantile_bucket(col_name: str, window_size: int, n_buckets: int = 10
     r_min = col.rolling_min(window_size=window_size)
     r_max = col.rolling_max(window_size=window_size)
 
-    # Scale to [0, 1] relative position within the rolling window, then map to bucket index
+    # Scale to [0, 1] relative position within the rolling window, then map to Int8 bucket index (0..n_buckets-1)
     rel_pos = (col - r_min) / (r_max - r_min + 1e-8)
-    bucket = (rel_pos * n_buckets).floor().cast(pl.Int32)
+    bucket = (rel_pos * n_buckets).floor().cast(pl.Int8)
     bucket_clipped = pl.when(bucket >= n_buckets).then(n_buckets - 1).when(bucket < 0).then(0).otherwise(bucket)
 
-    return bucket_clipped.alias(alias)
+    return bucket_clipped.cast(pl.Int8).alias(alias)
 
 
 def build_master_feature_table(

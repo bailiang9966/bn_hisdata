@@ -70,6 +70,7 @@ def test_rolling_quantile_bucket():
     res = df.with_columns(rolling_quantile_bucket("basis", window_size=5, n_buckets=5))
 
     assert "basis_bucket_5m_q5" in res.columns
+    assert res["basis_bucket_5m_q5"].dtype == pl.Int8
     # Check non-null values mapped to buckets 0 .. 4
     non_null_buckets = res["basis_bucket_5m_q5"].drop_nulls()
     assert len(non_null_buckets) > 0
